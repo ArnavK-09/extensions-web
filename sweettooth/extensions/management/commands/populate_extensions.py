@@ -1,12 +1,28 @@
+import io
 import random
 import uuid
+import zipfile
 
 from django.contrib.auth import get_user_model
 from django.contrib.sites.models import Site
 from django.core.exceptions import ObjectDoesNotExist
+from django.core.files.base import ContentFile
 from django.core.management.base import BaseCommand, CommandError
 
 from sweettooth.extensions import models
+
+
+def _make_dummy_zip(uuid_str: str) -> bytes:
+    """Return the bytes of a minimal GNOME Shell extension ZIP."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        metadata = (
+            '{"uuid":"%s","name":"Test Extension",'
+            '"description":"Dummy","shell-version":["42","43","44"]}'
+        ) % uuid_str
+        zf.writestr("metadata.json", metadata)
+        zf.writestr("extension.js", "// dummy\n")
+    return buf.getvalue()
 
 
 class Command(BaseCommand):
@@ -35,11 +51,13 @@ class Command(BaseCommand):
                           user does not exist.
         """
         current_site = Site.objects.get_current()
+        ext_uuid = "test-%s@%s" % (uuid.uuid4().hex, current_site.domain)
         metadata = {
-            "uuid": str(uuid.uuid4()),
+            "uuid": ext_uuid,
             "name": "Test Extension %d" % random.randint(1, 9999),
             "description": "Simple test metadata",
             "url": "%s" % current_site.domain,
+            "shell-version": ["42", "43", "44"],
         }
 
         UserModel = get_user_model()
@@ -61,14 +79,22 @@ class Command(BaseCommand):
                 raise CommandError("The specified username (%s) does not exist." % user)
 
         extension = models.Extension.objects.create_from_metadata(
-            metadata, creator=user
+            metadata.copy(), creator=user
         )
 
-        models.ExtensionVersion.objects.create(
-            extension=extension, status=models.STATUS_ACTIVE
+        version = models.ExtensionVersion(
+            extension=extension, status=models.STATUS_ACTIVE, metadata=metadata
         )
+        # Save first so version.pk and version.version are assigned.
+        version.save()
+
+        # Attach a real ZIP file so the download endpoint works.
+        zip_bytes = _make_dummy_zip(ext_uuid)
+        filename = "%s.v%d.shell-extension.zip" % (ext_uuid, version.version)
+        version.source.save(filename, ContentFile(zip_bytes), save=True)
+
         if verbose:
-            self.stdout.write("Created extension %s with user %s" % (metadata, user))
+            self.stdout.write("Created extension %s with user %s" % (ext_uuid, user))
 
     def handle(self, *args, **options):
         verbose = False
